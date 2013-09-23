@@ -1,5 +1,5 @@
 /*
- * Copyright 2012 Amazon Technologies, Inc.
+ * Copyright 2012-2013 Amazon Technologies, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,18 +14,23 @@
  */
 package com.amazonaws.memes;
 
+import static com.amazonaws.memes.AWSResources.DYNAMODB_MAPPER;
+import static com.amazonaws.memes.AWSResources.SQS;
+import static com.amazonaws.memes.AWSResources.SQS_QUEUE_NAME;
+
 import java.awt.image.BufferedImage;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.util.Date;
 import java.util.Timer;
 import java.util.TimerTask;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
 
-import com.amazonaws.auth.ClasspathPropertiesFileCredentialsProvider;
-import com.amazonaws.services.sqs.AmazonSQS;
-import com.amazonaws.services.sqs.AmazonSQSClient;
+import javax.imageio.ImageIO;
+
+import com.amazonaws.services.s3.model.CannedAccessControlList;
 import com.amazonaws.services.sqs.model.DeleteMessageRequest;
 import com.amazonaws.services.sqs.model.GetQueueUrlRequest;
 import com.amazonaws.services.sqs.model.Message;
@@ -33,127 +38,116 @@ import com.amazonaws.services.sqs.model.ReceiveMessageRequest;
 import com.amazonaws.services.sqs.model.ReceiveMessageResult;
 
 /**
- * The meme worker's job is to take work from SQS, look up the details in
- * Dynamo, then store the results back into S3.
- * 
- * @author zachmu
+ * The meme worker's job is to take work from Amazon SQS, look up the details in
+ * Dynamo, then store the results back into Amazon S3.
  */
 public class MemeWorker extends Thread {
 
-	private final S3ImageStorage s3ImageStore;
-	private final AmazonSQS sqs;
-	private final MemeStorage memeStorage;
-	private final ScheduledExecutorService executorService;
-	
-	public MemeWorker() {
-		ClasspathPropertiesFileCredentialsProvider provider = new ClasspathPropertiesFileCredentialsProvider();
-		s3ImageStore = new S3ImageStorage();
-		sqs = new AmazonSQSClient(provider);
-		sqs.setEndpoint(AWSResources.SQS_ENDPOINT);
-		memeStorage = new MemeStorage();
-		executorService = new ScheduledThreadPoolExecutor(10);
-	}
+    private final ScheduledExecutorService executorService = new ScheduledThreadPoolExecutor(10);
 
-	public static void main(String[] args) {
-		MemeWorker memeWorker = new MemeWorker();
-		memeWorker.start();
-		try {
-			memeWorker.join();
-		} catch (InterruptedException e) {
-			e.printStackTrace();
-		}
-	}
+    public static void main(String[] args) throws InterruptedException {
+        new MemeWorker().start();
+    }
 
-	@Override
-	public void run() {
-		String queueUrl = sqs.getQueueUrl(
-				new GetQueueUrlRequest().withQueueName(AWSResources.SQS_QUEUE))
-				.getQueueUrl();
+    @Override
+    public void run() {
+        System.out.println("MemeWorker listening for work");
+        String queueUrl = SQS.getQueueUrl(new GetQueueUrlRequest(SQS_QUEUE_NAME)).getQueueUrl();
 
-		while (true) {
-			try {
-				ReceiveMessageResult receiveMessage = sqs
-						.receiveMessage(new ReceiveMessageRequest()
-								.withMaxNumberOfMessages(1).withQueueUrl(
-										queueUrl));
-				for (Message msg : receiveMessage.getMessages()) {
-					processMessage(msg, queueUrl);
-				}
-				sleep(500);
-			} catch (InterruptedException e) {
-				Thread.currentThread().interrupt();
-				return;
-			} catch (Exception e) {
-				// ignore and retry
-			}
-		}
-	}
+        while (true) {
+            try {
+                ReceiveMessageResult result = SQS.receiveMessage(
+                        new ReceiveMessageRequest(queueUrl).withMaxNumberOfMessages(1));
+                for (Message msg : result.getMessages()) {
+                    executorService.submit(new MessageProcessor(queueUrl, msg));
+                }
+                sleep(1000);
+            } catch (InterruptedException e) {
+                Thread.interrupted();
+                throw new RuntimeException("Worker interrupted");
+            } catch (Exception e) {
+                // ignore and retry
+            }
+        }
+    }
 
-	/**
-	 * Processes the message given
-	 */
-	private void processMessage(final Message msg, final String queueUrl)
-			throws IOException {
-		
-		Runnable processRunnable = new Runnable() {
-			
-			@Override
-			public void run() {
-				String id = msg.getBody();
-				MemeCreationJob job = memeStorage.loadJob(id);
+    private final class MessageProcessor implements Runnable {
+        private final String queueUrl;
+        private final Message msg;
 
-				try {
-					if (job != null) {
-						job.setStatus(MemeCreationJob.WORKING_STATUS);
-						memeStorage.saveJob(job);
+        private MessageProcessor(String queueUrl, Message msg) {
+            this.queueUrl = queueUrl;
+            this.msg = msg;
+        }
 
-						BufferedImage image = s3ImageStore.loadBlankImage(job
-								.getImageKey());
-						BufferedImage overlay = overlayImage(job, image);
-						String finishedImageKey = s3ImageStore.storeFinishedImage(
-								overlay, job.getId());
-						job.setFinishedKey(finishedImageKey);
-						job.setStatus(MemeCreationJob.DONE_STATUS);
-						job.setUpdateTime(new Date());
-						memeStorage.saveJob(job);
-					}
-				} catch (Exception e) {
-					e.printStackTrace();
-					// Assume this job didn't work as expected
-					try {
-						job.setStatus(MemeCreationJob.FAILED_STATUS);
-						memeStorage.saveJob(job);
-					} catch (Exception e2) {
-						// oh well.
-					}
-				}
+        @Override
+        public void run() {
+            String id = msg.getBody();
+            final ImageMacro imageMacro = DYNAMODB_MAPPER.load(ImageMacro.class, id);
 
-				sqs.deleteMessage(new DeleteMessageRequest().withQueueUrl(queueUrl)
-						.withReceiptHandle(msg.getReceiptHandle()));
-			}
-		};
+            try {
+                if (imageMacro != null) {
+                    imageMacro.setStatus(ImageMacro.WORKING_STATUS);
+                    DYNAMODB_MAPPER.save(imageMacro);
 
-		executorService.schedule(processRunnable, 0, TimeUnit.SECONDS);
-	}
+                    // Process the image
+                    ByteArrayOutputStream output = new ByteArrayOutputStream();
+                    imageMacro.getStartingImageLink().downloadTo(output);
+                    BufferedImage sourceImage = ImageIO.read(new ByteArrayInputStream(output.toByteArray()));
+                    BufferedImage finishedImage = overlayImage(imageMacro, sourceImage);
 
-	/**
-	 * Performs the buffered image overlay process with a timeout
-	 */
-	private BufferedImage overlayImage(MemeCreationJob job, BufferedImage image)
-			throws IOException, InterruptedException {
+                    // Push the new image to S3
+                    imageMacro.getFinishedImageLink().uploadFrom(readImageIntoBuffer(finishedImage));
+                    imageMacro.getFinishedImageLink().setAcl(CannedAccessControlList.PublicRead);
 
-		// A timer to interrupt us after a timeout
-		final Thread thread = Thread.currentThread();
-		Timer timer = new Timer();
-		timer.schedule(new TimerTask() {
-			@Override
-			public void run() {
-				thread.interrupt();
-			}
-		}, 10000);
+                    imageMacro.setStatus(ImageMacro.DONE_STATUS);
+                    imageMacro.setUpdateTime(new Date());
+                    DYNAMODB_MAPPER.save(imageMacro);
+                }
+            } catch (Exception e) {
+                e.printStackTrace();
+                try {
+                    // Assume this job didn't work as expected
+                    imageMacro.setStatus(ImageMacro.FAILED_STATUS);
+                    DYNAMODB_MAPPER.save(imageMacro);
+                } catch (Exception e2) {
+                    e2.printStackTrace();
+                }
+            }
 
-		BufferedImage overlay = ImageOverlay.overlay(image,
-				job.getTopCaption(), job.getBottomCaption());
-		return overlay;
-	}
+            SQS.deleteMessage(new DeleteMessageRequest(queueUrl, msg.getReceiptHandle()));
+        }
+    }
+
+    /**
+     * Overlays the specified image with the captions from the MemeCreationJob
+     * and returns a new image. If the processing takes too long, this method
+     * will exit with an InterruptedException.
+     */
+    private BufferedImage overlayImage(ImageMacro imageMacro, BufferedImage image)
+            throws IOException, InterruptedException {
+
+        // A timer to interrupt us after a timeout
+        final Thread thread = Thread.currentThread();
+        Timer timer = new Timer();
+        timer.schedule(new TimerTask() {
+            @Override
+            public void run() {
+                thread.interrupt();
+            }
+        }, 10000);
+
+        return ImageOverlay.overlay(
+                image, imageMacro.getTopCaption(), imageMacro.getBottomCaption());
+    }
+
+    private byte[] readImageIntoBuffer(BufferedImage image) throws IOException {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        try {
+            ImageIO.write(image, "png", baos);
+            return baos.toByteArray();
+        } finally {
+            baos.close();
+        }
+    }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2012 Amazon Technologies, Inc.
+ * Copyright 2012-2013 Amazon Technologies, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,110 +14,97 @@
  */
 package com.amazonaws.memes;
 
-import com.amazonaws.AmazonServiceException;
+import com.amazonaws.auth.AWSCredentialsProvider;
 import com.amazonaws.auth.ClasspathPropertiesFileCredentialsProvider;
-import com.amazonaws.services.dynamodb.AmazonDynamoDB;
-import com.amazonaws.services.dynamodb.AmazonDynamoDBClient;
-import com.amazonaws.services.dynamodb.model.CreateTableRequest;
-import com.amazonaws.services.dynamodb.model.DescribeTableRequest;
-import com.amazonaws.services.dynamodb.model.KeySchema;
-import com.amazonaws.services.dynamodb.model.KeySchemaElement;
-import com.amazonaws.services.dynamodb.model.ProvisionedThroughput;
-import com.amazonaws.services.dynamodb.model.ScalarAttributeType;
-import com.amazonaws.services.dynamodb.model.TableDescription;
-import com.amazonaws.services.dynamodb.model.TableStatus;
-import com.amazonaws.services.s3.AmazonS3;
+import com.amazonaws.regions.Region;
+import com.amazonaws.regions.Regions;
+import com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient;
+import com.amazonaws.services.dynamodbv2.datamodeling.DynamoDBMapper;
+import com.amazonaws.services.dynamodbv2.model.AttributeDefinition;
+import com.amazonaws.services.dynamodbv2.model.CreateTableRequest;
+import com.amazonaws.services.dynamodbv2.model.KeySchemaElement;
+import com.amazonaws.services.dynamodbv2.model.KeyType;
+import com.amazonaws.services.dynamodbv2.model.ProvisionedThroughput;
+import com.amazonaws.services.dynamodbv2.model.ScalarAttributeType;
+import com.amazonaws.services.dynamodbv2.util.Tables;
 import com.amazonaws.services.s3.AmazonS3Client;
 import com.amazonaws.services.s3.model.CreateBucketRequest;
-import com.amazonaws.services.sqs.AmazonSQS;
 import com.amazonaws.services.sqs.AmazonSQSClient;
 import com.amazonaws.services.sqs.model.CreateQueueRequest;
 
 /**
- * Configuration for AWS resources. Run to set up your resources.
- * 
- * @author zachmu
+ * Configuration for AWS resources. Run this class to create your resources for
+ * the Meme Generator sample application.
  */
 public class AWSResources {
 
-	public static final String BUCKET_NAME = "CHANGEME";
+    public static final String S3_BUCKET_NAME = "reinvent-meme-generator";
+    public static final String SQS_QUEUE_NAME = "reinvent-memes";
+    public static final String DYNAMODB_TABLE_NAME = "reinvent-memes";
+
     public static final String MACRO_PATH = "macros/";
-    public static final String FINISHED_PATH = "memes/";   
-    public static final String SQS_QUEUE = "reinvent-memes";
-    public static final String DYNAMO_TABLE_NAME = "reinvent-memes";
-    
-    public static final String SQS_ENDPOINT = "sqs.us-west-1.amazonaws.com";
-	public static final String DYNAMO_ENDPOINT = "dynamodb.us-west-1.amazonaws.com";
-    
+    public static final String FINISHED_PATH = "memes/";
+
+    /*
+     * The SDK provides several easy to use credentials providers.
+     * Here we're loading our AWS security credentials from a properties
+     * file on our classpath.
+     */
+    public static final AWSCredentialsProvider CREDENTIALS_PROVIDER =
+            new ClasspathPropertiesFileCredentialsProvider();
+
+    /*
+     * This controls the AWS region used for created resources. You can easily
+     * deploy applications in any or all of the AWS regions around the world,
+     * allowing you to provide a lower latency and better experience for your
+     * customers.
+     */
+    public static final Region REGION = Region.getRegion(Regions.US_WEST_1);
+
+    /*
+     * We construct our clients to access AWS here, so that we can share them
+     * easily throughout our application.
+     */
+    public static final AmazonS3Client S3 = new AmazonS3Client(CREDENTIALS_PROVIDER);
+    public static final AmazonSQSClient SQS = new AmazonSQSClient(CREDENTIALS_PROVIDER);
+    public static final AmazonDynamoDBClient DYNAMODB = new AmazonDynamoDBClient(CREDENTIALS_PROVIDER);
+    public static final DynamoDBMapper DYNAMODB_MAPPER = new DynamoDBMapper(DYNAMODB, CREDENTIALS_PROVIDER);
+
+
+    static {
+        /*
+         * Set any other client options that you need here. For example, if you
+         * connect to the internet through a proxy, then call setConfiguration
+         * and pass in a ClientConfiguration object with your proxy settings.
+         *
+         * Here we set our region, so that we can keep our data located in the
+         * same region.
+         */
+        DYNAMODB.setRegion(REGION);
+        SQS.setRegion(REGION);
+    }
+
+
     public static void main(String[] args) {
-        createResources();
-    }
-    
-    private static void createResources() {
-        ClasspathPropertiesFileCredentialsProvider provider = new ClasspathPropertiesFileCredentialsProvider();
-        
-        AmazonSQS sqs = new AmazonSQSClient(provider);
-        sqs.setEndpoint(SQS_ENDPOINT);        
-        sqs.createQueue(new CreateQueueRequest().withQueueName(SQS_QUEUE));
-        
-        AmazonS3 s3 = new AmazonS3Client(provider);
-        if ( !s3.doesBucketExist(BUCKET_NAME) ) {
-            s3.createBucket(new CreateBucketRequest(BUCKET_NAME));
+        String queueUrl = SQS.createQueue(new CreateQueueRequest(SQS_QUEUE_NAME)).getQueueUrl();
+        System.out.println("Using Amazon SQS Queue: " + queueUrl);
+
+
+        if ( !S3.doesBucketExist(S3_BUCKET_NAME) ) {
+            S3.createBucket(new CreateBucketRequest(S3_BUCKET_NAME));
         }
-        
-        AmazonDynamoDBClient dynamo = new AmazonDynamoDBClient(provider);
-        dynamo.setEndpoint(DYNAMO_ENDPOINT);
+        System.out.println("Using Amazon S3 Bucket: " + S3_BUCKET_NAME);
 
-        if ( !doesTableExist(dynamo, DYNAMO_TABLE_NAME) ) {
-            dynamo.createTable(new CreateTableRequest()
-                    .withTableName(DYNAMO_TABLE_NAME)
-                    .withProvisionedThroughput(
-                            new ProvisionedThroughput().withReadCapacityUnits(50l).withWriteCapacityUnits(50l))
-                    .withKeySchema(
-                            new KeySchema().withHashKeyElement(new KeySchemaElement().withAttributeName("id")
-                                    .withAttributeType(ScalarAttributeType.S))));
-            waitForTableToBecomeAvailable(dynamo, DYNAMO_TABLE_NAME);
+
+        if ( !Tables.doesTableExist(DYNAMODB, DYNAMODB_TABLE_NAME) ) {
+            System.out.println("Creating new AWS DynamoDB Table...");
+            DYNAMODB.createTable(new CreateTableRequest()
+                    .withTableName(DYNAMODB_TABLE_NAME)
+                    .withKeySchema(new KeySchemaElement("id", KeyType.HASH))
+                    .withAttributeDefinitions(new AttributeDefinition("id", ScalarAttributeType.S))
+                    .withProvisionedThroughput(new ProvisionedThroughput(50l, 50l)));
         }
-    }
-
-    private static boolean doesTableExist(AmazonDynamoDB dynamo, String tableName) {
-        try {
-            TableDescription table = dynamo.describeTable(new DescribeTableRequest().withTableName(tableName))
-                    .getTable();
-            return "ACTIVE".equals(table.getTableStatus());
-        } catch ( AmazonServiceException ase ) {
-            if ( ase.getErrorCode().equals("ResourceNotFoundException") )
-                return false;
-            throw ase;
-        }
-    }
-
-    private static void waitForTableToBecomeAvailable(AmazonDynamoDB dynamo, String tableName) {
-        System.out.println("Waiting for " + tableName + " to become ACTIVE...");
-
-        long startTime = System.currentTimeMillis();
-        long endTime = startTime + (10 * 60 * 1000);
-        while ( System.currentTimeMillis() < endTime ) {
-            try {
-                Thread.sleep(1000 * 20);
-            } catch ( Exception e ) {
-            }
-            try {
-                DescribeTableRequest request = new DescribeTableRequest().withTableName(tableName);
-                TableDescription table = dynamo.describeTable(request).getTable();
-                if ( table == null )
-                    continue;
-
-                String tableStatus = table.getTableStatus();
-                System.out.println("  - current state: " + tableStatus);
-                if ( tableStatus.equals(TableStatus.ACTIVE.toString()) )
-                    return;
-            } catch ( AmazonServiceException ase ) {
-                if ( ase.getErrorCode().equalsIgnoreCase("ResourceNotFoundException") == false )
-                    throw ase;
-            }
-        }
-
-        throw new RuntimeException("Table " + tableName + " never went active");
+        Tables.waitForTableToBecomeActive(DYNAMODB, DYNAMODB_TABLE_NAME);
+        System.out.println("Using AWS DynamoDB Table: " + DYNAMODB_TABLE_NAME);
     }
 }

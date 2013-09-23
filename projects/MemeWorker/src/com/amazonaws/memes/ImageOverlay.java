@@ -1,6 +1,5 @@
 /*
- * Copyright 2012 Amazon Technologies, Inc.
-
+ * Copyright 2012-2013 Amazon Technologies, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -65,7 +64,6 @@ public class ImageOverlay {
 
             ImageIO.write(image, "png", new File(CAPTION_FILE));
         } catch ( IOException e ) {
-            // TODO Auto-generated catch block
             e.printStackTrace();
         }
     }
@@ -75,9 +73,9 @@ public class ImageOverlay {
      * bottom 20% of the image given.
      */
     private static void drawStringCentered(Graphics g, String text, BufferedImage image, boolean top) throws InterruptedException {
-    	if (text == null)
-    		text = "";
-    	
+        if (text == null)
+            text = "";
+
         int height = 0;
         int fontSize = MAX_FONT_SIZE;
         int maxCaptionHeight = image.getHeight() / 5;
@@ -92,15 +90,15 @@ public class ImageOverlay {
             int left = 0;
             int right = text.length() - 1;
             while ( left < right ) {
-            	
+
                 String substring = text.substring(left, right + 1);
                 Rectangle2D stringBounds = g.getFontMetrics().getStringBounds(substring, g);
                 while ( stringBounds.getWidth() > maxLineWidth ) {
-                	if (Thread.currentThread().isInterrupted()) {
-                		throw new InterruptedException();
-                	}
+                    if (Thread.currentThread().isInterrupted()) {
+                        throw new InterruptedException();
+                    }
 
-                	// look for a space to break the line
+                    // look for a space to break the line
                     boolean spaceFound = false;
                     for ( int i = right; i > left; i-- ) {
                         if ( text.charAt(i) == ' ' ) {
@@ -151,5 +149,4 @@ public class ImageOverlay {
             y += g.getFontMetrics().getHeight();
         }
     }
-
 }
